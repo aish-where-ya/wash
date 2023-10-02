@@ -1,15 +1,11 @@
-use std::{collections::HashMap, fs::File, io::prelude::*, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
-use crate::util::convert_error;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::warn;
-use nkeys::KeyPairType;
-use provider_archive::ProviderArchive;
 use serde_json::json;
-use wash_lib::cli::{extract_keypair, inspect, CommandOutput, OutputKind};
-
-const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+use wash_lib::cli::par::{handle_par_create, handle_par_insert};
+use wash_lib::cli::{inspect, par, CommandOutput, OutputKind};
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum ParCliCommand {
@@ -204,6 +200,42 @@ impl From<InspectCommand> for inspect::InspectCliCommand {
         }
     }
 }
+
+impl From<CreateCommand> for par::ParCreateArgs {
+    fn from(cmd: CreateCommand) -> Self {
+        par::ParCreateArgs {
+            capid: cmd.capid,
+            vendor: cmd.vendor,
+            revision: cmd.revision,
+            version: cmd.version,
+            schema: cmd.schema,
+            issuer: cmd.issuer,
+            subject: cmd.subject,
+            name: cmd.name,
+            directory: cmd.directory,
+            arch: cmd.arch,
+            binary: cmd.binary,
+            destination: cmd.destination,
+            compress: cmd.compress,
+            disable_keygen: cmd.disable_keygen,
+        }
+    }
+}
+
+impl From<InsertCommand> for par::ParInsertArgs {
+    fn from(cmd: InsertCommand) -> Self {
+        par::ParInsertArgs {
+            archive: cmd.archive,
+            arch: cmd.arch,
+            binary: cmd.binary,
+            directory: cmd.directory,
+            issuer: cmd.issuer,
+            subject: cmd.subject,
+            disable_keygen: cmd.disable_keygen,
+        }
+    }
+}
+
 pub(crate) async fn handle_command(
     command: ParCliCommand,
     output_kind: OutputKind,
@@ -223,69 +255,7 @@ pub(crate) async fn handle_create(
     cmd: CreateCommand,
     output_kind: OutputKind,
 ) -> Result<CommandOutput> {
-    let mut par = ProviderArchive::new(
-        &cmd.capid,
-        &cmd.name,
-        &cmd.vendor,
-        cmd.revision,
-        cmd.version,
-    );
-
-    let mut f = File::open(cmd.binary.clone())?;
-    let mut lib = Vec::new();
-    f.read_to_end(&mut lib)?;
-
-    let issuer = extract_keypair(
-        cmd.issuer,
-        Some(cmd.binary.clone()),
-        cmd.directory.clone(),
-        KeyPairType::Account,
-        cmd.disable_keygen,
-        output_kind,
-    )?;
-    let subject = extract_keypair(
-        cmd.subject,
-        Some(cmd.binary.clone()),
-        cmd.directory,
-        KeyPairType::Service,
-        cmd.disable_keygen,
-        output_kind,
-    )?;
-
-    par.add_library(&cmd.arch, &lib).map_err(convert_error)?;
-
-    let extension = if cmd.compress { ".par.gz" } else { ".par" };
-    let outfile = match cmd.destination {
-        Some(path) => path,
-        None => format!(
-            "{}{}",
-            PathBuf::from(cmd.binary.clone())
-                .file_stem()
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            extension
-        ),
-    };
-    if let Some(ref schema) = cmd.schema {
-        let bytes = std::fs::read(schema)?;
-        par.set_schema(
-            serde_json::from_slice::<serde_json::Value>(&bytes)
-                .with_context(|| "Unable to parse JSON from file contents".to_string())?,
-        )
-        .map_err(convert_error)
-        .with_context(|| format!("Error parsing JSON schema from file '{:?}'", schema))?;
-    }
-
-    par.write(&outfile, &issuer, &subject, cmd.compress)
-        .await
-        .map_err(|e| anyhow!("{}", e))
-        .with_context(|| {
-            format!(
-                "Error writing PAR. Please ensure directory {:?} exists",
-                PathBuf::from(outfile.clone()).parent().unwrap(),
-            )
-        })?;
+    let outfile = handle_par_create(cmd.into(), output_kind).await?;
 
     let mut map = HashMap::new();
     map.insert("file".to_string(), json!(outfile));
@@ -300,40 +270,7 @@ pub(crate) async fn handle_insert(
     cmd: InsertCommand,
     output_kind: OutputKind,
 ) -> Result<CommandOutput> {
-    let mut buf = Vec::new();
-    let mut f = File::open(cmd.archive.clone())?;
-    f.read_to_end(&mut buf)?;
-
-    let mut par = ProviderArchive::try_load(&buf)
-        .await
-        .map_err(convert_error)?;
-
-    let issuer = extract_keypair(
-        cmd.issuer,
-        Some(cmd.binary.clone()),
-        cmd.directory.clone(),
-        KeyPairType::Account,
-        cmd.disable_keygen,
-        output_kind,
-    )?;
-    let subject = extract_keypair(
-        cmd.subject,
-        Some(cmd.binary.clone()),
-        cmd.directory,
-        KeyPairType::Service,
-        cmd.disable_keygen,
-        output_kind,
-    )?;
-
-    let mut f = File::open(cmd.binary.clone())?;
-    let mut lib = Vec::new();
-    f.read_to_end(&mut lib)?;
-
-    par.add_library(&cmd.arch, &lib).map_err(convert_error)?;
-
-    par.write(&cmd.archive, &issuer, &subject, is_compressed(&buf)?)
-        .await
-        .map_err(convert_error)?;
+    handle_par_insert(cmd.clone().into(), output_kind).await?;
 
     let mut map = HashMap::new();
     map.insert("file".to_string(), json!(cmd.archive));
@@ -344,14 +281,6 @@ pub(crate) async fn handle_insert(
         ),
         map,
     ))
-}
-
-/// Inspects the byte slice for a GZIP header, and returns true if the file is compressed
-fn is_compressed(input: &[u8]) -> Result<bool> {
-    if input.len() < 2 {
-        bail!("Not enough bytes to be a valid PAR file");
-    }
-    Ok(input[0..2] == GZIP_MAGIC)
 }
 
 #[cfg(test)]
