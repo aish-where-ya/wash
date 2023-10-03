@@ -8,7 +8,7 @@ use log::warn;
 use nkeys::KeyPairType;
 use provider_archive::ProviderArchive;
 use serde_json::json;
-use wash_lib::cli::par::{convert_error, create_provider_archive, insert_provider_archive};
+use wash_lib::cli::par::{convert_error, create_provider_archive, insert_provider_binary};
 use wash_lib::cli::{extract_keypair, inspect, par, CommandOutput, OutputKind};
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -328,7 +328,7 @@ pub(crate) async fn handle_insert(
         .await
         .map_err(convert_error)?;
 
-    par = insert_provider_archive(cmd.arch, &lib, par).await?;
+    par = insert_provider_binary(cmd.arch, &lib, par).await?;
     par.write(&cmd.archive, &issuer, &subject, is_compressed(&buf)?)
         .await
         .map_err(convert_error)?;

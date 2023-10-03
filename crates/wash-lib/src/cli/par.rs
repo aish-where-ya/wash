@@ -42,7 +42,7 @@ pub async fn create_provider_archive(
     Ok(par)
 }
 
-pub async fn insert_provider_archive(
+pub async fn insert_provider_binary(
     arch: String,
     binary_bytes: &[u8],
     mut par: ProviderArchive,
